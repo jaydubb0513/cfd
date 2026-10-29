@@ -1,0 +1,6 @@
+{
+  "vessel": { "diameter": 1.2, "liquidHeight": 1.2, "straightSide": 1.25, "head": "torispherical", "baffles": 4, "baffleWidth": 0.0833 },
+  "impellers": [{ "type": "rushton", "diameter": 0.4, "clearance": 0.4, "blades": 6, "width": 0.2 }],
+  "speed": 120,
+  "fluid": { "preset": "water", "density": 998, "model": "newtonian", "viscosity": 0.001 }
+}

@@ -1,0 +1,9 @@
+{
+  "vessel": { "diameter": 2.0, "liquidHeight": 3.6, "straightSide": 3.7, "head": "ellipsoidal", "baffles": 4, "baffleWidth": 0.1 },
+  "impellers": [
+    { "type": "pbt", "diameter": 0.8, "clearance": 0.8, "blades": 4, "width": 0.2, "pitch": 45, "pumping": "down" },
+    { "type": "pbt", "diameter": 0.8, "clearance": 2.4, "blades": 4, "width": 0.2, "pitch": 45, "pumping": "down" }
+  ],
+  "speed": 70,
+  "fluid": { "preset": "water", "density": 998, "model": "newtonian", "viscosity": 0.001 }
+}

@@ -1,0 +1,6 @@
+{
+  "vessel": { "diameter": 1.0, "liquidHeight": 0.9, "straightSide": 1.0, "head": "torispherical", "baffles": 0 },
+  "impellers": [{ "type": "anchor", "diameter": 0.92, "clearance": 0.06, "blades": 2, "width": 0.8 }],
+  "speed": 30,
+  "fluid": { "preset": "syrup", "density": 1380, "model": "newtonian", "viscosity": 6.0 }
+}

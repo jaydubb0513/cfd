@@ -1,0 +1,7 @@
+{
+  "vessel": { "diameter": 1.0, "liquidHeight": 1.0, "straightSide": 1.05, "head": "torispherical", "baffles": 4, "baffleWidth": 0.0833 },
+  "impellers": [{ "type": "rushton", "diameter": 0.33, "clearance": 0.33, "blades": 6, "width": 0.2 }],
+  "speed": 150,
+  "fluid": { "preset": "carbopol", "density": 1000, "model": "herschel", "tauY": 8, "K": 1.8, "n": 0.45 },
+  "view": { "field": "viscosity" }
+}
