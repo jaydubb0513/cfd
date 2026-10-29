@@ -1,5 +1,5 @@
 # cfd
-computational flow diagram automation
+computational fluid dynamics automation
 
 ## 도구
 
