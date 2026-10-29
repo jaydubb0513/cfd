@@ -69,7 +69,8 @@ root.innerHTML = `
   <details class="cfd-method"><summary>계산 방법과 한계</summary>
     <p>단면의 색은 축대칭(r–z) 비압축성 Navier–Stokes를 선회 성분과 함께 엇갈림(MAC) 격자에서 푼 결과입니다. 이류는 semi-Lagrangian, 점성은 국부 겉보기 점도(Newtonian, power-law, Herschel–Bulkley)와 난류 와점성 ν<sub>t</sub> = 0.09 ε<sup>1/3</sup>(0.07T)<sup>4/3</sup>의 implicit 처리, 압력은 red-black SOR 투영입니다. 벽은 층류에서 no-slip, 난류에서는 c<sub>f</sub>/2 ≈ 0.0015 벽함수입니다.</p>
     <p>임펠러는 격자로 그리지 않고 스윕 영역의 운동량 source로 둡니다: 날개 속도의 일정 비율로 선회를 주고, 반경류·축류 임펠러는 토출 속도를 주되 그 세기를 유량수 Nq(Q = Nq·N·D³)에 맞게 실시간 보정합니다. 배플은 벽 근처 선회에 대한 항력입니다. 선회의 원심력 v²/r이 Rushton의 이중 루프와 무배플 와류를 만듭니다.</p>
-    <p>동력(Np), 유량수, 혼합시간(Grenville), 캐번 직경(Elson)은 상관식입니다. 3차원 효과(날개 후류 와류, 배플 뒤 박리, 자유표면 변형, 기포)는 들어 있지 않으므로 설계 확정에는 3D RANS/LES나 실험으로 검증하세요.</p>
+    <p>해석은 평평한 액면(rigid lid)에서 하고, 그림의 액면 모양은 계산된 선회로부터 반경 방향 정수압 평형 dp/dr = ρv²/r로 구해 부피가 보존되도록 그립니다(실제 축척, 과장 없음). 와류 중심이 임펠러 근처까지 내려오거나 벽쪽 액면이 림에 닿으면 경고가 뜹니다. 액면 변형이 유동에 주는 영향은 해석에 다시 반영되지 않습니다.</p>
+    <p>동력(Np), 유량수, 혼합시간(Grenville), 캐번 직경(Elson)은 상관식입니다. 3차원 효과(날개 후류 와류, 배플 뒤 박리, 기포)와 액면 변형이 유동에 주는 영향은 들어 있지 않으므로 설계 확정에는 3D RANS/LES나 실험으로 검증하세요.</p>
   </details>
 </section>`;
 
@@ -248,7 +249,9 @@ function rebuild() {
     solver.u.set(old.u); solver.w.set(old.w); solver.v.set(old.v);
   }
   lastKey = key;
-  map = pixelMap();
+  surfaceReset();
+  if (keep) surfaceUpdate(1);
+  surfaceCommit();
   display = new Float32Array(solver.NR * solver.NZ);
   seedParticles();
   renderResults();
@@ -269,7 +272,7 @@ function mountFigure() {
   stage.style.aspectRatio = `${width} / ${height}`;
   stage.setAttribute("aria-label", fig.label);
   backSvg.innerHTML = fig.back;
-  frontSvg.innerHTML = `${fig.frontStatic}<clipPath id="cfd-liquid"><path d="${fig.clip}"/></clipPath><g clip-path="url(#cfd-liquid)" class="cfd-dim"><g>${fig.dimStatic}</g><g data-part="dim"></g></g>${fig.shaft}<g data-part="near"></g>${fig.top}`;
+  frontSvg.innerHTML = `${fig.frontStatic}<clipPath id="cfd-liquid"><path d="${fig.clip}"/></clipPath><g clip-path="url(#cfd-liquid)" class="cfd-dim"><g>${fig.dimStatic}</g><g data-part="dim"></g></g><path data-part="waterline" class="iso-line" data-tone="mid" style="stroke-width:1.2"/>${fig.shaft}<g data-part="near"></g>${fig.top}`;
   fieldCanvas.width = width;
   fieldCanvas.height = height;
   const ratio = Math.min(2, (window.devicePixelRatio || 1) * 1.25);
@@ -285,62 +288,235 @@ function drawRotor() {
   frontSvg.querySelector('[data-part="near"]').innerHTML = parts.near;
 }
 
+// ---------------------------------------------------------------- surface
+// The solver keeps a flat (rigid-lid) surface; the drawn surface follows the
+// computed swirl through radial hydrostatic balance, dp/dr = rho v^2 / r, so
+// z(r) = z0 + (1/g) ∫ v^2/r dr, with z0 set so the liquid volume is kept.
+const SURFACE_SAMPLES = 64;
+let surface = null; // { z: Float32Array (world units at r = i Rw / (n-1)), drawn: copy used by the pixel map }
+function surfaceReset() {
+  const n = SURFACE_SAMPLES;
+  surface = { z: new Float32Array(n).fill(fig.lay.Hw), drawn: new Float32Array(n).fill(fig.lay.Hw), min: fig.lay.Hw, max: fig.lay.Hw };
+}
+const surfaceProfile = new Float32Array(512);
+function surfaceUpdate(blend = 0.35) {
+  const { s, Rw, Hw, zIn } = fig.lay;
+  const n = SURFACE_SAMPLES;
+  const lift = solver.surfaceProfile(surfaceProfile); // metres, rising from the axis
+  const NR = solver.NR, h = solver.h;
+  const rise = (r) => {
+    const x = Math.min(Math.max(r / h - 0.5, 0), NR - 1);
+    const i = Math.min(Math.floor(x), NR - 2);
+    const f = x - i;
+    return (lift[i] * (1 - f) + lift[i + 1] * f) * (r / h < 0.5 ? (2 * r) / h : 1);
+  };
+  // Area-weighted mean rise over the free surface keeps the volume.
+  const edge = fig.rTop / s;
+  let sum = 0, area = 0;
+  for (let i = 0; i < 200; i++) {
+    const r = ((i + 0.5) / 200) * edge;
+    sum += rise(r) * r;
+    area += r;
+  }
+  const z0 = Hw - (sum / area) * s;
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const r = (i / (n - 1)) * Rw;
+    const target = Math.max(z0 + rise(r / s) * s, zIn(r) + 0.6);
+    surface.z[i] += (target - surface.z[i]) * blend;
+    lo = Math.min(lo, surface.z[i]);
+    hi = Math.max(hi, surface.z[i]);
+  }
+  surface.min = lo;
+  surface.max = hi;
+}
+// Drawn surface height (world) at world radius r, and its slope dz/dr.
+function surfaceAt(r, table = surface.drawn) {
+  const n = SURFACE_SAMPLES;
+  const x = Math.min(Math.max((r / fig.lay.Rw) * (n - 1), 0), n - 1);
+  const i = Math.min(Math.floor(x), n - 2);
+  const f = x - i;
+  return table[i] * (1 - f) + table[i + 1] * f;
+}
+function surfaceSlope(r, table = surface.drawn) {
+  const n = SURFACE_SAMPLES;
+  const x = Math.min(Math.max((r / fig.lay.Rw) * (n - 1), 0), n - 1);
+  const i = Math.min(Math.floor(x), n - 2);
+  return (table[i + 1] - table[i]) / (fig.lay.Rw / (n - 1));
+}
+// Redraw the surface once it has moved by more than about half a pixel.
+function surfaceMoved() {
+  let worst = 0;
+  for (let i = 0; i < SURFACE_SAMPLES; i++) worst = Math.max(worst, Math.abs(surface.z[i] - surface.drawn[i]));
+  return worst > 0.45;
+}
+function surfaceCommit() {
+  surface.drawn.set(surface.z);
+  map = pixelMap();
+  surfaceMask = null;
+  frontSvg.querySelector("#cfd-liquid path")?.setAttribute("d", liquidClip());
+  frontSvg.querySelector('[data-part="waterline"]')?.setAttribute("d", waterline());
+}
+// Where the surface meets the inside of the back wall, in the runs the front
+// flanks of the shell do not hide (a crisp edge over the canvas pixels).
+function waterline() {
+  const { Rw, Zr } = fig.lay;
+  const cam = k.cameraOf(fig.P);
+  const tanE = cam.sinE / cam.cosE;
+  const a = (fig.P.azimuth ?? 45) * DEG;
+  const z = surfaceAt(fig.rTop);
+  if (fig.rTop < Rw - 0.5) return "";
+  let d = "";
+  let run = [];
+  const flush = () => { if (run.length > 1) d += "M" + run.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join("L"); run = []; };
+  for (let deg = 90; deg <= 270; deg += 1) {
+    const t = deg * DEG;
+    const back = Math.abs(Math.cos(t)) * Rw;
+    const across = Math.PI - Math.abs(Math.atan2(Math.sin(t), Math.cos(t)));
+    const hidden = across >= WEDGE && z + 2 * back * tanE < Zr;
+    if (hidden) { flush(); continue; }
+    run.push(k.iso([Rw * Math.cos(a + t), Rw * Math.sin(a + t), z], fig.P));
+  }
+  flush();
+  return d;
+}
+// Clip of the two cut faces of the liquid, with the surface as their top.
+function liquidClip() {
+  const { inner, Rw } = fig.lay;
+  const steps = 48;
+  let d = "";
+  for (const side of [1, -1]) {
+    const pts = [];
+    for (const [r, z] of inner) if (z < surfaceAt(r)) pts.push(screenOf(side, r, z));
+    for (let i = steps; i >= 0; i--) {
+      const r = (i / steps) * Math.min(fig.rTop, Rw);
+      pts.push(screenOf(side, r, surfaceAt(r)));
+    }
+    d += "M" + pts.map(([x, y]) => `${x.toFixed(1)} ${y.toFixed(1)}`).join("L") + "Z";
+  }
+  return d;
+}
+// Screen point of a world point (radius rho, height z) on cut face side +1/-1.
+function screenOf(side, rho, z) {
+  const cam = k.cameraOf(fig.P);
+  const [ox, oy] = k.iso([0, 0, 0], fig.P);
+  return [ox - side * cam.k * rho * Math.sin(WEDGE), oy + cam.k * (rho * Math.cos(WEDGE) * cam.sinE - z * cam.cosE)];
+}
+
 // For every canvas pixel: which liquid face it sees (cut face A, cut face B
 // or the free surface) and where that is in the solver grid.
 function pixelMap() {
-  const { width, height, P, lay, a } = fig;
-  const { s, Rw, Zb, Zr, Hw, zIn } = lay;
+  const { width, height, P } = fig;
+  const { s, Rw, Zb, Zr, zIn, inner } = fig.lay;
   const cam = k.cameraOf(P);
   const [ox, oy] = k.iso([0, 0, 0], P);
   const K = cam.k;
   const sinW = Math.sin(WEDGE), cosW = Math.cos(WEDGE);
   const tanE = cam.sinE / cam.cosE;
   const rTop = fig.rTop;
+  const a = (P.azimuth ?? 45) * DEG;
+  const light = G_LIGHT(P);
   const baffles = fig.baffles.map((t) => ({ t, sin: Math.sin(t), cos: Math.cos(t), r0: Rw - fig.gap - fig.bw, r1: Rw - fig.gap }));
-  const idx = [], fi = [], fj = [], shade = [];
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) {
+  const zTop = surface.max, zLow = surface.min;
+  const flat = zTop - zLow < 0.05;
+  const idx = [], fi = [], fj = [], shade = [], lit = [], alpha = [];
+  // Only the screen box of the liquid can hold a hit.
+  const zBottom = inner[0][1];
+  const x0 = Math.max(0, Math.floor(ox - K * Rw)), x1 = Math.min(width, Math.ceil(ox + K * Rw));
+  const y0 = Math.max(0, Math.floor(oy - K * (Rw * cam.sinE + zTop * cam.cosE))), y1 = Math.min(height, Math.ceil(oy + K * (Rw * cam.sinE - zBottom * cam.cosE)));
+  // Edge pixels get alpha from how much of them lies inside the wall (in r)
+  // and above the rim that hides the near side (in z): an anti-aliased edge.
+  const perPxR = K * cam.sinE, perPxZ = K * cam.cosE;
+  const rEdge = rTop + 0.5 / perPxR;
+  const inside = (p, q, z) => {
+    const r = Math.hypot(p, q);
+    return r <= rEdge && Math.abs(Math.atan2(-q, p)) >= WEDGE && z <= surfaceAt(r);
+  };
+  for (let y = y0; y < y1; y++)
+    for (let x = x0; x < x1; x++) {
       const sx = x + 0.5, sy = y + 0.5;
       const dx = sx - ox;
       // Cut faces: t = +45° maps to the left of the axis, -45° to the right.
       const rho = Math.abs(dx) / (K * sinW);
       const z = (oy + K * rho * cosW * cam.sinE - sy) / (K * cam.cosE);
-      if (rho <= Rw && z >= zIn(rho) && z <= Hw) {
+      if (rho <= Rw && z >= zIn(rho) && z <= surfaceAt(rho)) {
         idx.push(x + y * width);
         fi.push(rho / s);
         fj.push((z - Zb) / s);
         shade.push(dx < 0 ? 0 : 1);
+        lit.push(dx < 0 ? 1 : 0.84);
+        alpha.push(1);
         continue;
       }
-      // Free surface of the remaining liquid.
+      // Free surface of the remaining liquid: march the ray down from the
+      // viewer side and take the first point under the surface.
       const q = dx / K;
-      const p = ((sy - oy) / K + Hw * cam.cosE) / cam.sinE;
+      if (Math.abs(q) > rTop) continue;
+      const base = (sy - oy) / K;
+      const pOf = (zz) => (base + zz * cam.cosE) / cam.sinE;
+      const pm = Math.sqrt(rTop * rTop - q * q);
+      const zFar = (-pm * cam.sinE - base) / cam.cosE, zNear = (pm * cam.sinE - base) / cam.cosE;
+      let hit = null;
+      if (flat) {
+        if (zTop >= zFar && zTop <= zNear && inside(pOf(zTop), q, zTop - 1e-6)) hit = zTop;
+      } else {
+        const hiZ = Math.min(zTop, zNear), loZ = Math.max(zLow, zFar);
+        if (hiZ < loZ) continue;
+        for (let zz = hiZ; zz >= loZ - 0.5; zz -= 0.5) {
+          const zc = Math.max(zz, loZ);
+          if (!inside(pOf(zc), q, zc)) continue;
+          // Bisect between the last point above and this one.
+          let up = Math.min(zc + 0.5, hiZ + 0.5), down = zc;
+          for (let it = 0; it < 6; it++) {
+            const mid = (up + down) / 2;
+            if (inside(pOf(mid), q, mid)) down = mid; else up = mid;
+          }
+          hit = down;
+          break;
+        }
+      }
+      if (hit === null) continue;
+      const p = pOf(hit);
       const r = Math.hypot(p, q);
-      if (r > rTop) continue;
-      const t = Math.atan2(-q, p);
-      if (Math.abs(t) < WEDGE) continue;
       // Hidden behind the shell where the ray toward the viewer leaves the
       // vessel through a wall that is still there, below the rim.
       const pExit = Math.sqrt(Math.max(0, Rw * Rw - q * q));
-      const zExit = Hw + (pExit - p) * tanE;
-      if (Math.abs(Math.atan2(-q, pExit)) >= WEDGE && zExit < Zr) continue;
+      const zExit = hit + (pExit - p) * tanE;
+      let cover = Math.min(1, Math.max(0, (rTop - r) * perPxR + 0.5));
+      if (Math.abs(Math.atan2(-q, pExit)) >= WEDGE) cover *= Math.min(1, Math.max(0, (zExit - Zr) * perPxZ + 0.5));
+      if (cover <= 0.01) continue;
       // ...or behind a baffle standing out of the liquid.
       let hidden = false;
       for (const b of baffles) {
         if (Math.abs(b.sin) < 1e-6) continue;
-        const rr = q / b.sin * -1;
+        const rr = -q / b.sin;
         if (rr < b.r0 || rr > b.r1) continue;
         const d = rr * b.cos - p;
-        if (d > 0 && Hw + d * tanE < Zr - 2) { hidden = true; break; }
+        if (d > 0 && hit + d * tanE < Zr - 2 && hit + d * tanE > surfaceAt(rr)) { hidden = true; break; }
       }
       if (hidden) continue;
+      // Shade the surface by its own slope so a vortex reads as a funnel.
+      const slope = surfaceSlope(r);
+      const t = Math.atan2(-q, p);
+      const nx = -slope * Math.cos(a + t), ny = -slope * Math.sin(a + t);
+      const len = Math.hypot(nx, ny, 1);
+      const facing = (nx * light[0] + ny * light[1] + light[2]) / len - light[2];
       idx.push(x + y * width);
       fi.push(r / s);
-      fj.push((Hw - Zb) / s - 1e-6);
+      fj.push(Math.min(hit - Zb, fig.lay.Hw - Zb) / s - 1e-6);
       shade.push(2);
+      lit.push(Math.min(1.1, Math.max(0.62, 0.94 + 1.1 * facing)));
+      alpha.push(cover);
     }
   const image = fieldCanvas.getContext("2d").createImageData(width, height);
-  return { idx: Int32Array.from(idx), fi: Float32Array.from(fi), fj: Float32Array.from(fj), shade: Uint8Array.from(shade), image, pixels: new Uint32Array(image.data.buffer), ox, oy, K, cam };
+  return { idx: Int32Array.from(idx), fi: Float32Array.from(fi), fj: Float32Array.from(fj), shade: Uint8Array.from(shade), lit: Float32Array.from(lit), cover: Float32Array.from(alpha), image, pixels: new Uint32Array(image.data.buffer), ox, oy, K, cam };
+}
+// The kit's light direction (same as lathe's lightOf).
+function G_LIGHT(P) {
+  const { sinA, cosA } = k.cameraOf(P);
+  const v = [-sinA, cosA, 1.2];
+  const l = Math.hypot(...v);
+  return v.map((x) => x / l);
 }
 
 // Screen point of a liquid point (r, z in metres) on cut face side +1/-1.
@@ -404,13 +580,12 @@ function paintField() {
   range = currentField();
   const signed = FIELDS[config.view.field].signed;
   lut = colormap(signed ? "coolwarm" : config.view.colormap, document.body.dataset.theme);
-  const { idx, fi, fj, shade, pixels, image } = map;
+  const { idx, fi, fj, shade, lit, cover, pixels, image } = map;
   const NR = solver.NR, NZ = solver.NZ, h = solver.h, hz = solver.hz;
   const [lo, hi] = range;
   const span = 255 / (hi - lo || 1);
   const light = document.body.dataset.theme === "light";
   const alpha = light ? [236, 236, 228] : [238, 238, 232];
-  const gain = [1, 0.84, 0.94];
   pixels.fill(0);
   for (let q = 0; q < idx.length; q++) {
     let x = fi[q] / h - 0.5, y = fj[q] / hz - 0.5;
@@ -424,9 +599,10 @@ function paintField() {
     const value = (display[c] * (1 - ax) + display[c + 1] * ax) * (1 - ay) + (display[c + NR] * (1 - ax) + display[c + NR + 1] * ax) * ay;
     let t = ((value - lo) * span) | 0;
     t = t < 0 ? 0 : t > 255 ? 255 : t;
-    const g = gain[shade[q]];
+    const g = lit[q];
     const rgb = lut[t];
-    pixels[idx[q]] = (alpha[shade[q]] << 24) | (((rgb[2] * g) | 0) << 16) | (((rgb[1] * g) | 0) << 8) | ((rgb[0] * g) | 0);
+    const b = Math.min(255, rgb[2] * g) | 0, gr = Math.min(255, rgb[1] * g) | 0, rd = Math.min(255, rgb[0] * g) | 0;
+    pixels[idx[q]] = (((alpha[shade[q]] * cover[q]) | 0) << 24) | (b << 16) | (gr << 8) | rd;
   }
   fieldCanvas.getContext("2d").putImageData(image, 0, 0);
 }
@@ -489,6 +665,7 @@ function moveParticles(dt, wall) {
       p.age = 0;
       p.trail = [];
     }
+    if (fig.lay.Zb + p.z * fig.lay.s > surfaceAt(p.r * fig.lay.s)) { p.trail = []; continue; }
     p.trail.push(planePoint(p.side, p.r, p.z));
     if (p.trail.length > 9) p.trail.shift();
   }
@@ -507,7 +684,7 @@ function moveParticles(dt, wall) {
     const { lay, a } = fig;
     const rho = d.r * lay.s;
     const t = Math.atan2(Math.sin(d.t), Math.cos(d.t));
-    const pt = k.iso([rho * Math.cos(a + t), rho * Math.sin(a + t), lay.Hw], fig.P);
+    const pt = k.iso([rho * Math.cos(a + t), rho * Math.sin(a + t), surfaceAt(rho)], fig.P);
     const px = Math.floor(pt[0]), py = Math.floor(pt[1]);
     const ok = Math.abs(t) > WEDGE && visibleSurface(px, py);
     if (!ok) { d.trail = []; continue; }
@@ -598,7 +775,28 @@ function updateLive() {
     el.textContent = blendSim !== null ? `${format.num(blendSim, 3)} s` : `${format.num(mix.since, 3)} s · 편차 ${(mix.worst * 100).toFixed(0)}%`;
   }
   const vx = $("[data-live=vortex]");
-  if (vx) vx.textContent = format.si(solver.vortexDepth(), "m", 2);
+  const depthM = (surface.z[SURFACE_SAMPLES - 1] - surface.z[0]) / fig.lay.s;
+  if (vx) vx.textContent = depthM < 1 ? `${format.num(Math.max(depthM, 0) * 100, 3)} cm` : `${format.num(depthM, 3)} m`;
+  const centre = (surface.z[0] - fig.lay.Zb) / fig.lay.s;
+  const reached = result.impellers.find((imp) => imp.type !== "anchor" && centre < imp.clearance + (imp.width * imp.diameter) / 2 + 0.25 * imp.diameter);
+  let warn = $("[data-live=vortex-warn]");
+  if (reached && !warn) {
+    warn = document.createElement("li");
+    warn.dataset.live = "vortex-warn";
+    $(".cfd-warnings").append(warn);
+  }
+  const spill = surface.max > fig.lay.Zr - 0.5;
+  let over = $("[data-live=spill-warn]");
+  if (spill && !over) {
+    over = document.createElement("li");
+    over.dataset.live = "spill-warn";
+    over.textContent = "와류로 벽쪽 액면이 림까지 올라갑니다: 넘칠 수 있습니다. 직동부를 높이거나 회전수를 낮추세요.";
+    $(".cfd-warnings").append(over);
+  } else if (!spill && over) over.remove();
+  if (warn) {
+    if (reached) warn.textContent = `표면 와류 중심(액면 ${format.num(centre, 3)} m)이 ${reached.spec.label} 가까이 내려왔습니다: 공기 흡입 위험. 배플을 넣거나 회전수를 낮추세요.`;
+    else warn.remove();
+  }
   result.impellers.forEach((imp, i) => {
     const cell = $(`[data-live=q${i}]`);
     if (cell) cell.textContent = imp.Q > 0 ? flow(solver.pumping(imp)) : "–";
@@ -631,6 +829,10 @@ function loop(now) {
     angle += Math.min(result.N * 2 * Math.PI * simDt, 0.2 * Math.PI * 2 * wall * 6);
     moveParticles(simDt, wall);
     drawRotor();
+  }
+  if (running && tick % 6 === 0) {
+    surfaceUpdate();
+    if (surfaceMoved()) surfaceCommit();
   }
   paintField();
   drawParticles();
